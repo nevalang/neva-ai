@@ -1,9 +1,10 @@
 import {
     fmt
+    lists
+    os
     runtime
 }
 
-// Mode values are string-based for now to keep parsing simple.
 type Command struct {
     mode string
     tool string
@@ -15,18 +16,27 @@ type ToolSpec struct {
     description string
 }
 
+type Request struct {
+    command Command
+    tools list<ToolSpec>
+    message string
+}
+
 type ToolCall struct {
     name string
     args string
 }
 
-type SessionInput struct {
-    command Command
-    message string
+type ToolResult struct {
+    output string
 }
 
 def Main(start any) (stop any) {
-    app App
+    app App{
+        parser ParseCommandFromArgs,
+        planner CommandPlanner,
+        executor MockToolExecutor
+    }
     println fmt.Println<string>
     panic runtime.Panic
     ---
@@ -36,72 +46,155 @@ def Main(start any) (stop any) {
     [app:err, println:err] -> panic
 }
 
+// High-level API surface:
+// - parser: CLI model binding
+// - planner: request -> tool call planning
+// - executor: tool call execution backend
+// This mirrors "construct dependencies, then run app" from cmd/neva in Go.
 def App(sig any) (res string, err error) {
-    parse ParseCLI?
-    build BuildSessionInput?
-    route Route?
+    parser ICommandParser?
+    planner IRequestPlanner
+    executor IToolExecutor?
+
+    tools DefaultTools
+    req BuildRequest
+    out FormatOutput
     ---
-    :sig -> parse -> build -> route -> :res
+    :sig -> [parser, tools]
+    parser -> req:command
+    tools -> req:tools
+    req -> planner -> executor -> out -> :res
 }
 
-// Route is the central orchestrator. It decides whether we enter chat mode
-// or execute a single-run tool invocation.
-#extern(neva_ai_route)
-def Route(input SessionInput) (res string, err error)
+interface ICommandParser(any) (res Command, err error)
 
-// Chat mode currently performs one decision/execute cycle.
-// A persistent multi-turn loop will be added via runtime externs.
-def Chat(input SessionInput) (res string, err error) {
-    choose ChooseTool?
-    exec ExecuteTool?
-    fmt_output FormatOutput
+// Minimal strict parser for MVP:
+// args[1] => mode, args[2] => tool, args[3] => prompt
+// If user passes fewer args, parsing naturally returns compiler.Error.
+def ParseCommandFromArgs(sig any) (res Command, err error) {
+    args os.Args
+    mode lists.At<string>?
+    tool lists.At<string>?
+    prompt lists.At<string>?
+    builder Struct<Command>
     ---
-    :input -> choose -> exec -> fmt_output -> :res
+    :sig -> args
+
+    args -> [
+        mode:data,
+        1 -> mode:idx,
+
+        tool:data,
+        2 -> tool:idx,
+
+        prompt:data,
+        3 -> prompt:idx
+    ]
+
+    mode -> builder:mode
+    tool -> builder:tool
+    prompt -> builder:prompt
+    builder -> :res
 }
 
-// Run mode bypasses LLM decision and executes explicit command.tool.
-def Run(input SessionInput) (res string, err error) {
-    to_call CommandToToolCall?
-    exec ExecuteTool?
-    fmt_output FormatOutput
+def DefaultTools(sig any) (res list<ToolSpec>) {
+    run_tool Struct<ToolSpec>
+    build_tool Struct<ToolSpec>
+    to_list lists.FromArray<ToolSpec>
     ---
-    :input -> to_call -> exec -> fmt_output -> :res
+    :sig -> [
+        'neva.run' -> run_tool:name,
+        'Compile and run a package' -> run_tool:description,
+        'neva.build' -> build_tool:name,
+        'Compile package without running' -> build_tool:description
+    ]
+
+    run_tool -> to_list:port[0]
+    build_tool -> to_list:port[1]
+    to_list -> :res
 }
 
-def FormatOutput(data string) (res string) {
+def BuildRequest(command Command, tools list<ToolSpec>) (res Request) {
+    msg RenderPrompt
+    builder Struct<Request>
+    ---
+    :command -> [msg, builder:command]
+    :tools -> builder:tools
+    msg -> builder:message
+    builder -> :res
+}
+
+// Current prompt renderer is intentionally typed and deterministic.
+def RenderPrompt(cmd Command) (res string) {
+    a Add
+    b Add
+    c Add
+    d Add
+    e Add
+    ---
+    :cmd -> [
+        'mode=' -> a:left,
+        .mode -> a:right,
+        ' tool=' -> b:right,
+        .tool -> c:right,
+        ' prompt=' -> d:right,
+        .prompt -> e:right
+    ]
+    a -> b:left
+    b -> c:left
+    c -> d:left
+    d -> e:left
+
+    e -> :res
+}
+
+interface IRequestPlanner(Request) (res ToolCall)
+
+// CommandPlanner keeps planning policy in one replaceable component.
+def CommandPlanner(req Request) (res ToolCall) {
+    builder Struct<ToolCall>
+    ---
+    :req -> [
+        .command -> .tool -> builder:name,
+        .message -> builder:args
+    ]
+    builder -> :res
+}
+
+interface IToolExecutor(ToolCall) (res ToolResult, err error)
+
+// Placeholder adapter. Replace with real bridge to pkg/cli functionality.
+def MockToolExecutor(call ToolCall) (res ToolResult, err error) {
+    render RenderMockExecution
+    builder Struct<ToolResult>
+    ---
+    :call -> render -> builder:output
+    builder -> :res
+}
+
+def RenderMockExecution(call ToolCall) (res string) {
+    a Add
+    b Add
+    c Add
+    ---
+    :call -> [
+        'exec tool=' -> a:left,
+        .name -> a:right,
+        ' args=' -> b:right,
+        .args -> c:right
+    ]
+    a -> b:left
+    b -> c:left
+
+    c -> :res
+}
+
+def FormatOutput(result ToolResult) (res string) {
     add_prefix Add
     ---
-    :data -> [
-        add_prefix:right,
+    :result -> [
+        .output -> add_prefix:right,
         'neva-ai> ' -> add_prefix:left
     ]
     add_prefix -> :res
 }
-
-// ---- Runtime contracts (to be implemented incrementally) ----
-
-// ParseCLI reads os.Args and returns a typed command.
-// Rules:
-// - no command => mode=chat
-// - command=run => tool is required
-// - prompt is optional arbitrary string parameter
-#extern(neva_ai_parse_cli)
-def ParseCLI(sig any) (res Command, err error)
-
-// BuildSessionInput composes final message from command + optional prompt.
-#extern(neva_ai_build_session_input)
-def BuildSessionInput(cmd Command) (res SessionInput, err error)
-
-// ChooseTool calls LLM with tool specs + prepared message
-// and returns a typed tool invocation.
-#extern(neva_ai_choose_tool)
-def ChooseTool(input SessionInput) (res ToolCall, err error)
-
-// CommandToToolCall creates direct ToolCall from command.tool in run mode.
-#extern(neva_ai_command_to_tool_call)
-def CommandToToolCall(input SessionInput) (res ToolCall, err error)
-
-// ExecuteTool dispatches the selected tool.
-// Implementation target: runtime bridge to pkg/cli functions.
-#extern(neva_ai_execute_tool)
-def ExecuteTool(call ToolCall) (res string, err error)
